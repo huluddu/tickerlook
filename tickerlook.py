@@ -4,12 +4,12 @@ import yfinance as yf
 import plotly.express as px
 import google.generativeai as genai
 import time
-import requests # [NEW] 차단 우회용
+import requests
 
 # --- 1. 페이지 설정 ---
-st.set_page_config(page_title="AI 퀀트 V29 (Anti-Block)", layout="wide")
-st.title("🤖 AI 퀀트 스크리너 V29 (Mobile & Cloud Ready)")
-st.markdown("클라우드 서버 차단을 우회하기 위해 **헤더(User-Agent)** 기술을 적용했습니다.")
+st.set_page_config(page_title="AI 퀀트 V30 (Global Fix)", layout="wide")
+st.title("🤖 AI 퀀트 스크리너 V30 (Yahoo & Naver Fix)")
+st.markdown("클라우드 환경에서 **Yahoo Finance(미국)**와 **네이버(한국)**의 차단을 모두 우회합니다.")
 
 # --- 2. 사이드바 ---
 st.sidebar.header("1. 시장 선택")
@@ -68,13 +68,26 @@ def clean_numeric(value):
         return float(value)
     except: return 0.0
 
-# --- 3. 데이터 수집 함수 (헤더 적용) ---
+# [핵심] 차단 우회용 세션 생성 (Yahoo & Naver 공용)
+def get_session():
+    session = requests.Session()
+    # 진짜 브라우저처럼 보이는 헤더
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://www.google.com/'
+    })
+    return session
+
+# --- 3. 데이터 수집 함수 ---
 @st.cache_data
 def analyze_data(country, index, sector):
     data = []
+    session = get_session() # 세션 가져오기
     
     # ==========================================
-    # 🇺🇸 미국 시장
+    # 🇺🇸 미국 시장 (Yahoo Finance Fix)
     # ==========================================
     if country == "미국 (US)":
         sector_map = {
@@ -99,47 +112,61 @@ def analyze_data(country, index, sector):
         bar = st.progress(0, text=f"🇺🇸 {sector} 데이터 수집 중...")
         for i, t in enumerate(target_tickers):
             try:
-                info = yf.Ticker(t).info
-                data.append({
-                    '티커': t, '종목명': info.get('shortName', t), '현재가': info.get('currentPrice', 0),
-                    'PER': info.get('trailingPE', 0), 'ROE': info.get('returnOnEquity', 0) * 100 if info.get('returnOnEquity') else 0, 
-                    'EPS': info.get('trailingEps', 0),
-                    '부채비율': info.get('debtToEquity', 0)
-                })
-            except: pass
+                # [핵심] yfinance에 커스텀 세션 주입
+                ticker = yf.Ticker(t, session=session)
+                
+                # 1. fast_info 시도 (빠르고 차단 덜 됨)
+                try:
+                    price = ticker.fast_info['last_price']
+                except:
+                    price = 0
+                
+                # 2. info 시도 (재무정보)
+                try:
+                    info = ticker.info
+                    name = info.get('shortName', t)
+                    per = info.get('trailingPE', 0)
+                    roe = info.get('returnOnEquity', 0) * 100 if info.get('returnOnEquity') else 0
+                    eps = info.get('trailingEps', 0)
+                    debt = info.get('debtToEquity', 0)
+                    if price == 0: price = info.get('currentPrice', 0)
+                except:
+                    # 실패 시 기본값
+                    name = t
+                    per, roe, eps, debt = 0, 0, 0, 0
+                
+                if price > 0: # 가격이 있을 때만 추가
+                    data.append({
+                        '티커': t, '종목명': name, '현재가': price,
+                        'PER': per, 'ROE': roe, 'EPS': eps, '부채비율': debt
+                    })
+            except: 
+                pass
             bar.progress((i+1)/len(target_tickers))
         bar.empty()
 
     # ==========================================
-    # 🇰🇷 한국 시장 (네이버 차단 우회 적용)
+    # 🇰🇷 한국 시장 (Naver Fix)
     # ==========================================
     else:
         sosok = 0 if index == 'KOSPI' else 1
         url_base = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page="
-        
-        # [핵심] 브라우저인 척 속이는 헤더 (이게 없으면 차단됨)
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
         
         all_dfs = []
         bar = st.progress(0, text="🇰🇷 네이버 증권 데이터(상위 200개) 스캔 중...")
         
         for page in range(1, 5): 
             try:
-                # requests로 먼저 html을 가져오고 -> pandas에 넘김
-                res_html = requests.get(url_base + str(page), headers=headers)
+                # [핵심] requests로 먼저 html 가져옴 (헤더 포함)
+                res_html = session.get(url_base + str(page))
                 dfs = pd.read_html(res_html.text, encoding='euc-kr', header=0)
                 
                 df = dfs[1].dropna(subset=['종목명'])
                 df = df[df['종목명'] != '종목명']
                 all_dfs.append(df)
                 bar.progress(page / 4)
-                # 너무 빠르면 차단될 수 있으니 0.5초 쉼
-                time.sleep(0.5) 
-            except Exception as e: 
-                # st.error(f"Error on page {page}: {e}") # 디버깅용
-                pass
+                time.sleep(0.2) # 약간의 딜레이
+            except: pass
         
         bar.empty()
             
@@ -169,12 +196,13 @@ if st.button("🚀 데이터 분석 시작", type="primary"):
     df = analyze_data(country, market_index, target_sector)
     
     if not df.empty:
+        # 전처리
         for c in ['PER','ROE','EPS', '부채비율']: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         
-        df['S_PER'] = 1 - df['PER'].rank(ascending=False, pct=True) # 낮을수록 점수 높음
+        df['S_PER'] = 1 - df['PER'].rank(ascending=False, pct=True) 
         df['S_ROE'] = df['ROE'].rank(ascending=True, pct=True)
         df['S_EPS'] = df['EPS'].rank(ascending=True, pct=True)
-        df['S_Debt'] = 1 - df['부채비율'].rank(ascending=False, pct=True) # 낮을수록 점수 높음
+        df['S_Debt'] = 1 - df['부채비율'].rank(ascending=False, pct=True)
         
         df['점수'] = (df['S_PER']*w_per + df['S_ROE']*w_roe + df['S_EPS']*w_eps + df['S_Debt']*w_debt)
         
@@ -189,7 +217,7 @@ if st.button("🚀 데이터 분석 시작", type="primary"):
         st.session_state['chat_history'] = []
         st.rerun()
     else:
-        st.error("데이터 수집 실패. (네이버 차단 또는 네트워크 오류)")
+        st.error("데이터 수집 실패. (잠시 후 다시 시도하거나 서버 상태를 확인하세요)")
 
 # 결과 출력
 if st.session_state['res'] is not None:
@@ -236,7 +264,7 @@ if st.session_state['res'] is not None:
             st.session_state['current_ticker'] = target_name
             st.session_state['chat_history'] = []
             t_data = res[res['종목명']==target_name].iloc[0]
-            welcome_msg = f"**{target_name}** ({t_data['티커']}) 종목 데이터.\n\n- 주가: {t_data['현재가']:,.0f}\n- PER: {t_data['PER']:.2f}\n- ROE: {t_data['ROE']:.2f}%\n- 부채비율: {t_data['부채비율']:.2f}%"
+            welcome_msg = f"**{target_name}** ({t_data['티커']})\n- PER: {t_data['PER']:.2f}\n- ROE: {t_data['ROE']:.2f}%\n- 부채비율: {t_data['부채비율']:.2f}%"
             st.session_state['chat_history'].append({"role": "assistant", "content": welcome_msg})
 
         chat_container = st.container(height=400)
