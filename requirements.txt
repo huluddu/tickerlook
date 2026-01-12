@@ -1,9 +1,9 @@
 streamlit
 pandas
-numpy
 yfinance
 plotly
-pykrx
 google-generativeai
-setuptools
 lxml
+requests
+beautifulsoup4
+html5lib
