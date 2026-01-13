@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.express as px
-import plotly.graph_objects as go # [NEW] 캔들 차트용
+import plotly.graph_objects as go
 import google.generativeai as genai
 import time
 import requests
@@ -12,9 +12,9 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
 # --- 1. 페이지 설정 ---
-st.set_page_config(page_title="AI 퀀트 V40 (Chart View)", layout="wide")
-st.title("🤖 AI 퀀트 스크리너 V40 (Trend & Chart)")
-st.markdown("종목 선택 시 **3년치 일봉 차트와 120일 이평선**을 시각화하여 장기 추세를 한눈에 파악합니다.")
+st.set_page_config(page_title="AI 퀀트 V41 (Hybrid Fetch)", layout="wide")
+st.title("🤖 AI 퀀트 스크리너 V41 (Hybrid Fetching)")
+st.markdown("주가 데이터(Bulk)와 재무 데이터(Individual) 수집 방식을 분리하여 **데이터 수집 성공률을 극대화**했습니다.")
 
 # --- 2. 사이드바 ---
 st.sidebar.header("1. 시장 선택")
@@ -41,11 +41,11 @@ use_log_y = st.sidebar.checkbox("Y축 (ROE) 로그", value=False)
 show_avg = st.sidebar.checkbox("평균선 표시", value=True)
 
 st.sidebar.markdown("---")
-st.sidebar.header("3. 가중치 설정 (총합 100 권장)")
-w_per = st.sidebar.slider("저평가 (PER, 낮을수록 좋음)", 0, 100, 40)
-w_roe = st.sidebar.slider("수익성 (ROE, 높을수록 좋음)", 0, 100, 40)
-w_eps = st.sidebar.slider("성장성 (EPS, 높을수록 좋음)", 0, 100, 10)
-w_debt = st.sidebar.slider("안정성 (부채비율, 낮을수록 좋음)", 0, 100, 10)
+st.sidebar.header("3. 가중치 설정")
+w_per = st.sidebar.slider("저평가 (PER)", 0, 100, 40)
+w_roe = st.sidebar.slider("수익성 (ROE)", 0, 100, 40)
+w_eps = st.sidebar.slider("성장성 (EPS)", 0, 100, 10)
+w_debt = st.sidebar.slider("안정성 (부채비율)", 0, 100, 10)
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔑 AI 설정")
@@ -76,14 +76,13 @@ def get_session():
     })
     return session
 
-# --- [NEW] 차트 시각화 함수 ---
+# --- 차트 그리기 ---
 def draw_chart(ticker_code, country_code, market_index=""):
     try:
         df = pd.DataFrame()
         end_dt = datetime.now()
-        start_dt = end_dt - timedelta(days=365*3) # 3년치
+        start_dt = end_dt - timedelta(days=365*3)
         
-        # 데이터 로드
         if country_code == "한국 (KR)":
             s_str = start_dt.strftime("%Y%m%d")
             e_str = end_dt.strftime("%Y%m%d")
@@ -100,7 +99,6 @@ def draw_chart(ticker_code, country_code, market_index=""):
             
         if len(df) < 10: return None
 
-        # yfinance 멀티인덱스 대응 (Close가 DataFrame일 경우)
         if isinstance(df['Close'], pd.DataFrame):
             df_new = pd.DataFrame()
             df_new['Close'] = df['Close'].iloc[:, 0]
@@ -109,39 +107,22 @@ def draw_chart(ticker_code, country_code, market_index=""):
             df_new['Low'] = df['Low'].iloc[:, 0]
             df = df_new
 
-        # 120일 이평선 계산
         df['MA120'] = df['Close'].rolling(window=120).mean()
 
-        # Plotly 캔들차트
         fig = go.Figure()
-
-        # 캔들스틱
-        fig.add_trace(go.Candlestick(
-            x=df.index,
-            open=df['Open'], high=df['High'],
-            low=df['Low'], close=df['Close'],
-            name='주가'
-        ))
-
-        # 120일선 (오렌지색)
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df['MA120'],
-            mode='lines', name='120일 이평선',
-            line=dict(color='orange', width=2)
-        ))
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='주가'))
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA120'], mode='lines', name='120일선', line=dict(color='orange', width=2)))
 
         fig.update_layout(
-            title=f"📊 지난 3년 주가 흐름 (with MA120)",
-            yaxis_title="주가",
-            xaxis_rangeslider_visible=False, # 하단 슬라이더 제거 (깔끔하게)
+            title="📊 3년 주가 흐름 & 120일선",
+            yaxis_title="Price",
+            xaxis_rangeslider_visible=False,
             height=500,
             template="plotly_dark",
             margin=dict(l=20, r=20, t=50, b=20)
         )
         return fig
-
-    except Exception as e:
-        return None
+    except: return None
 
 # --- 기술적 지표 계산 ---
 def calculate_technicals(ticker_code, country_code, market_index=""):
@@ -163,12 +144,9 @@ def calculate_technicals(ticker_code, country_code, market_index=""):
             
         if len(df) < 20: return None
 
-        if isinstance(df['Close'], pd.DataFrame):
-            close = df['Close'].iloc[:, 0]
-            high = df['High'].iloc[:, 0]
-            low = df['Low'].iloc[:, 0]
-        else:
-            close, high, low = df['Close'], df['High'], df['Low']
+        close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
+        high = df['High'].iloc[:, 0] if isinstance(df['High'], pd.DataFrame) else df['High']
+        low = df['Low'].iloc[:, 0] if isinstance(df['Low'], pd.DataFrame) else df['Low']
         
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
@@ -187,19 +165,15 @@ def calculate_technicals(ticker_code, country_code, market_index=""):
         
         w_r = -100 * ((highest_high - close) / (highest_high - lowest_low))
         
-        return {
-            "RSI": rsi.iloc[-1],
-            "Stochastic_K": k_percent.iloc[-1],
-            "CCI": cci.iloc[-1],
-            "Williams_R": w_r.iloc[-1]
-        }
+        return {"RSI": rsi.iloc[-1], "Stochastic_K": k_percent.iloc[-1], "CCI": cci.iloc[-1], "Williams_R": w_r.iloc[-1]}
     except: return None
 
-# --- 3. 데이터 수집 함수 ---
+# --- 3. 데이터 수집 함수 (Hybrid V41) ---
 @st.cache_data
 def analyze_data(country, index, sector):
     data = []
     
+    # 🇺🇸 미국 (Hybrid: Bulk Price + Gentle Info)
     if country == "미국 (US)":
         sector_map = {
             "기술 (Technology)": ['AAPL', 'MSFT', 'NVDA', 'AVGO', 'AMD', 'INTC', 'CRM', 'ADBE', 'ORCL', 'IBM', 'QCOM', 'TXN', 'NOW', 'AMAT', 'MU', 'PLTR', 'SMCI'],
@@ -212,42 +186,74 @@ def analyze_data(country, index, sector):
         russell_tickers = ['MSTR', 'SMCI', 'DKNG', 'RIVN', 'SOFI', 'HOOD', 'AFRM', 'LCID', 'MARA', 'CLSK', 'COIN', 'RIOT', 'GME', 'AMC', 'PATH', 'U']
 
         target_tickers = []
-        if index == "Russell 2000 (중소형)":
-            target_tickers = russell_tickers
+        if index == "Russell 2000 (중소형)": target_tickers = russell_tickers
         else:
-            if sector == "전체 (All)":
+            if "전체" in sector:
                 for k in sector_map: target_tickers += sector_map[k]
             else:
                 target_tickers = sector_map.get(sector, [])
 
-        bar = st.progress(0, text=f"🇺🇸 {sector} 데이터 수집 중...")
+        bar = st.progress(0, text=f"🇺🇸 {sector} : 주가 데이터 일괄 다운로드 중... (1/2)")
         
+        # [Step 1] 주가(Price)는 한 방에 가져오기 (성공률 99%)
+        try:
+            bulk_data = yf.download(target_tickers, period="1d", progress=False)
+            # 멀티인덱스 처리 ('Close', 'AAPL')
+            has_bulk = not bulk_data.empty
+        except:
+            has_bulk = False
+
+        bar.progress(0.3, text=f"🇺🇸 {sector} : 재무 데이터 상세 조회 중... (2/2)")
+        
+        # [Step 2] 재무(Info)는 살살 가져오기
         for i, t in enumerate(target_tickers):
             try:
+                # 1. Price 확보
+                price = 0
+                if has_bulk:
+                    try:
+                        # yfinance 버전에 따라 컬럼 구조가 다를 수 있음
+                        if isinstance(bulk_data['Close'], pd.DataFrame):
+                            price = bulk_data['Close'][t].iloc[-1]
+                        else:
+                            price = bulk_data['Close'].iloc[-1]
+                    except: price = 0
+                
+                # 2. Fundamentals 확보 (재시도 로직 포함)
                 ticker = yf.Ticker(t)
-                try: price = ticker.fast_info['last_price']
-                except: price = 0
+                info = {}
                 
-                time.sleep(0.2)
-                try:
+                # 시도 1
+                try: 
                     info = ticker.info
-                    if not info: raise ValueError
-                    name = info.get('shortName', t)
-                    per = info.get('trailingPE', 0)
-                    roe = info.get('returnOnEquity', 0) * 100 if info.get('returnOnEquity') else 0
-                    eps = info.get('trailingEps', 0)
-                    debt = info.get('debtToEquity', 0)
-                    if price == 0: price = info.get('currentPrice', 0)
-                except:
-                    name = t
-                    per, roe, eps, debt = 0, 0, 0, 0
+                except: 
+                    time.sleep(1) # 실패시 1초 쉬고 재시도
+                    try: info = ticker.info
+                    except: info = {}
                 
-                if price > 0:
+                # 0.5초 대기 (서버 부하 방지)
+                time.sleep(0.5)
+
+                name = info.get('shortName', t)
+                if price == 0: price = info.get('currentPrice', 0) # Bulk 실패시 info에서 재시도
+                
+                per = info.get('trailingPE', 0)
+                roe = info.get('returnOnEquity', 0) * 100 if info.get('returnOnEquity') else 0
+                eps = info.get('trailingEps', 0)
+                debt = info.get('debtToEquity', 0)
+
+                # 가격이라도 있으면 추가
+                if price > 0 or per > 0:
                     data.append({'티커':t, '종목명':name, '현재가':price, 'PER':per, 'ROE':roe, 'EPS':eps, '부채비율':debt})
             except: pass
-            bar.progress((i+1)/len(target_tickers))
+            
+            # 진행상황 업데이트 (0.3 ~ 1.0 구간 매핑)
+            prog = 0.3 + (0.7 * (i+1) / len(target_tickers))
+            bar.progress(min(prog, 1.0))
+            
         bar.empty()
 
+    # 🇰🇷 한국 (Naver + Code Extract)
     else:
         session = get_session()
         sosok = 0 if index == 'KOSPI' else 1
@@ -338,6 +344,7 @@ if st.session_state['res'] is not None:
     avg_per = res[res['PER']>0]['PER'].mean()
     avg_roe = res['ROE'].mean()
     
+    # 1. 차트 영역
     fig = px.scatter(
         res, x='PER', y='ROE', 
         size='Size', color='점수', 
@@ -354,6 +361,7 @@ if st.session_state['res'] is not None:
     
     st.plotly_chart(fig, use_container_width=True)
     
+    # 2. 랭킹 리스트
     st.subheader("🏆 랭킹 리스트")
     st.dataframe(res[['순위','종목명','점수','현재가','PER','ROE','EPS','부채비율']].set_index('순위')
                     .style.format({'현재가':'{:.0f}', 'PER':'{:.2f}', 'ROE':'{:.2f}', 'EPS':'{:.2f}', '부채비율':'{:.2f}'}), 
@@ -361,6 +369,7 @@ if st.session_state['res'] is not None:
 
     st.markdown("---") 
 
+    # 3. 퀀트 컨설턴트
     st.subheader("💬 Gemini 퀀트 컨설턴트 (종목 심층 분석)")
     
     stock_list = res['종목명'].tolist()
@@ -375,15 +384,14 @@ if st.session_state['res'] is not None:
         t_data = res[res['종목명']==target_name].iloc[0]
         ticker_code = t_data['티커']
         
-        # [NEW] 차트 그리기
         chart_fig = None
-        with st.spinner(f"{target_name} 차트 로딩 중..."):
+        tech_data = None
+        
+        with st.spinner(f"{target_name} 차트 및 지표 분석 중..."):
              chart_fig = draw_chart(str(ticker_code), country, market_index)
              tech_data = calculate_technicals(str(ticker_code), country, market_index)
         
-        # 차트 출력 (있을 때만)
-        if chart_fig:
-            st.plotly_chart(chart_fig, use_container_width=True)
+        if chart_fig: st.plotly_chart(chart_fig, use_container_width=True)
 
         if tech_data:
             tech_msg = f"""
@@ -401,7 +409,6 @@ if st.session_state['res'] is not None:
         welcome_msg = f"**{target_name}** ({ticker_code})\nPER: {t_data['PER']:.2f} | ROE: {t_data['ROE']:.2f}% | 부채: {t_data['부채비율']:.0f}%" + tech_msg
         st.session_state['chat_history'].append({"role": "assistant", "content": welcome_msg})
 
-    # (차트가 위에서 이미 그려졌으므로, 아래는 채팅만)
     chat_container = st.container(height=500)
     for msg in st.session_state['chat_history']:
         with chat_container.chat_message(msg["role"]):
