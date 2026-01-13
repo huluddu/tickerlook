@@ -5,11 +5,16 @@ import plotly.express as px
 import google.generativeai as genai
 import time
 import requests
+import numpy as np # 계산용
 
 # --- 1. 페이지 설정 ---
-st.set_page_config(page_title="AI 퀀트 V35 (Ranking Fix)", layout="wide")
-st.title("🤖 AI 퀀트 스크리너 V35 (Ranking & Parsing Fix)")
-st.markdown("데이터 파싱 엔진을 교체하고, **랭킹 로직을 '줄 세우기' 방식**으로 직관화했습니다.")
+st.set_page_config(page_title="AI 퀀트 V36 (Technical)", layout="wide")
+st.title("🤖 AI 퀀트 스크리너 V36 (Fundamental + Technical)")
+st.markdown("""
+**업그레이드 완료:**
+* **재무 분석:** PER, ROE, 부채비율로 우량주 발굴
+* **기술적 분석:** 선택한 종목의 **RSI, CCI, Stochastic, Williams %R, Momentum**을 실시간 계산하여 AI가 매매 타이밍 조언
+""")
 
 # --- 2. 사이드바 ---
 st.sidebar.header("1. 시장 선택")
@@ -21,13 +26,8 @@ target_sector = "전체"
 if country == "미국 (US)":
     market_index = st.sidebar.selectbox("지수", ["S&P 500 / NASDAQ", "Russell 2000 (중소형)"])
     target_sector = st.sidebar.selectbox("섹터 (업종)", [
-        "기술 (Technology)", 
-        "커뮤니케이션 (Communication)", 
-        "헬스케어 (Healthcare)", 
-        "소비재 (Consumer)", 
-        "금융 (Financial)", 
-        "에너지/산업 (Energy/Ind)",
-        "전체 (All)"
+        "기술 (Technology)", "커뮤니케이션 (Communication)", "헬스케어 (Healthcare)", 
+        "소비재 (Consumer)", "금융 (Financial)", "에너지/산업 (Energy/Ind)", "전체 (All)"
     ])
 else:
     market_index = st.sidebar.selectbox("지수", ["KOSPI", "KOSDAQ"])
@@ -40,11 +40,11 @@ use_log_y = st.sidebar.checkbox("Y축 (ROE) 로그", value=False)
 show_avg = st.sidebar.checkbox("평균선 표시", value=True)
 
 st.sidebar.markdown("---")
-st.sidebar.header("3. 가중치 설정 (총합 100 권장)")
-w_per = st.sidebar.slider("저평가 (PER, 낮을수록 좋음)", 0, 100, 40)
-w_roe = st.sidebar.slider("수익성 (ROE, 높을수록 좋음)", 0, 100, 40)
-w_eps = st.sidebar.slider("성장성 (EPS, 높을수록 좋음)", 0, 100, 10)
-w_debt = st.sidebar.slider("안정성 (부채비율, 낮을수록 좋음)", 0, 100, 10)
+st.sidebar.header("3. 가중치 설정")
+w_per = st.sidebar.slider("저평가 (PER)", 0, 100, 40)
+w_roe = st.sidebar.slider("수익성 (ROE)", 0, 100, 40)
+w_eps = st.sidebar.slider("성장성 (EPS)", 0, 100, 10)
+w_debt = st.sidebar.slider("안정성 (부채비율)", 0, 100, 10)
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔑 AI 설정")
@@ -74,6 +74,62 @@ def get_session():
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     })
     return session
+
+# --- [NEW] 기술적 지표 계산 함수 ---
+def calculate_technicals(ticker_symbol):
+    try:
+        # 최근 6개월 데이터 가져오기 (지표 계산용)
+        # 한국 주식은 .KS 또는 .KQ 붙여야 함 (이미 티커에 붙어있다고 가정하거나 처리)
+        if ticker_symbol.isdigit(): # 한국 숫자 티커인 경우
+            # 코스피/코스닥 구분이 모호하므로 시도
+            try:
+                df = yf.download(f"{ticker_symbol}.KS", period="6mo", progress=False)
+                if df.empty: df = yf.download(f"{ticker_symbol}.KQ", period="6mo", progress=False)
+            except: return None
+        else:
+            df = yf.download(ticker_symbol, period="6mo", progress=False)
+        
+        if len(df) < 20: return None # 데이터 부족
+
+        # 종가 Series
+        close = df['Close'].iloc[:, 0] if len(df.columns) > 1 else df['Close'] # 멀티인덱스 처리
+        high = df['High'].iloc[:, 0] if len(df.columns) > 1 else df['High']
+        low = df['Low'].iloc[:, 0] if len(df.columns) > 1 else df['Low']
+        
+        # 1. RSI (14일)
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        # 2. Stochastic (14일)
+        lowest_low = low.rolling(window=14).min()
+        highest_high = high.rolling(window=14).max()
+        k_percent = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+        
+        # 3. CCI (20일)
+        tp = (high + low + close) / 3
+        sma_tp = tp.rolling(window=20).mean()
+        mean_dev = tp.rolling(window=20).apply(lambda x: np.mean(np.abs(x - x.mean())))
+        cci = (tp - sma_tp) / (0.015 * mean_dev)
+        
+        # 4. Williams %R (14일)
+        w_r = -100 * ((highest_high - close) / (highest_high - lowest_low))
+        
+        # 5. Momentum (10일)
+        momentum = close.diff(10)
+
+        # 최신 값 추출
+        return {
+            "RSI": rsi.iloc[-1],
+            "Stochastic_K": k_percent.iloc[-1],
+            "CCI": cci.iloc[-1],
+            "Williams_R": w_r.iloc[-1],
+            "Momentum": momentum.iloc[-1]
+        }
+    except Exception as e:
+        return None
 
 # --- 3. 데이터 수집 함수 ---
 @st.cache_data
@@ -129,7 +185,7 @@ def analyze_data(country, index, sector):
             bar.progress((i+1)/len(target_tickers))
         bar.empty()
 
-    # 🇰🇷 한국 (파싱 엔진 bs4로 교체)
+    # 🇰🇷 한국
     else:
         session = get_session()
         sosok = 0 if index == 'KOSPI' else 1
@@ -141,7 +197,6 @@ def analyze_data(country, index, sector):
         for page in range(1, 5): 
             try:
                 res_html = session.get(url_base + str(page))
-                # [핵심 수정] flavor='bs4' 사용 (html5lib 엔진 가동)
                 dfs = pd.read_html(res_html.text, encoding='euc-kr', header=0, flavor='bs4')
                 df = dfs[1].dropna(subset=['종목명'])
                 df = df[df['종목명'] != '종목명']
@@ -177,57 +232,26 @@ if st.button("🚀 데이터 분석 시작", type="primary"):
     if not df.empty:
         for c in ['PER','ROE','EPS','부채비율']: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         
-        # === 🏆 랭킹 로직 완전 분해 (절대값 순위) ===
+        df['temp_per'] = df['PER'].apply(lambda x: x if x > 0 else 99999)
+        df['S_PER'] = 1 - df['temp_per'].rank(ascending=False, pct=True) 
+        df['S_ROE'] = df['ROE'].rank(ascending=True, pct=True)
+        df['S_EPS'] = df['EPS'].rank(ascending=True, pct=True)
+        df['S_Debt'] = 1 - df['부채비율'].rank(ascending=False, pct=True)
         
-        # 1. PER 점수 (낮을수록 좋음, 0 이하는 0점)
-        # 0보다 큰 애들만 뽑음
-        valid_per = df[df['PER'] > 0].copy()
-        if not valid_per.empty:
-            # Rank(ascending=False) -> 값이 크면 1등(High Rank). 작으면 N등(Low Rank).
-            # 우리가 원하는 것: 작으면 고득점(High Rank).
-            # Rank(ascending=False): PER 100 -> Rank 1. PER 5 -> Rank 100.
-            # 이 Rank 그대로 쓰면 PER 100이 점수 먹음.
-            # -> Rank(ascending=False)를 쓰면 PER 높은게 1등.
-            # -> 100 - Score 하면 안됨?
-            # 아니다. Rank(ascending=False)로 하면 큰 값이 상위 랭크(1, 2, 3...). 
-            # 점수 = Rank. 그러니까 PER 클수록 점수가 큼. -> 틀림.
-            
-            # [수정] Rank(ascending=False): 큰 값이 1등(숫자 작음).
-            # 아 헷갈리니 min-max 정규화로 갑니다.
-            # 점수 = (Max - 내값) / (Max - Min) * 100. (내값이 작을수록 100에 가까움)
-            max_p = valid_per['PER'].max()
-            min_p = valid_per['PER'].min()
-            # 분모가 0이면 모두 100점
-            denom = (max_p - min_p) if max_p != min_p else 1
-            
-            # 공식: 내 PER가 작을수록 점수가 커야 함.
-            # Score = (Max_PER - My_PER) / Denom
-            df.loc[df['PER'] > 0, 'S_PER'] = (max_p - df['PER']) / denom
-            df.loc[df['PER'] <= 0, 'S_PER'] = 0 # 적자는 0점
-        else:
-            df['S_PER'] = 0
+        # Min-Max Scaling (V35 Logic)
+        max_p, min_p = df['temp_per'].max(), df['temp_per'].min()
+        df['S_PER'] = (max_p - df['temp_per']) / ((max_p - min_p) if max_p != min_p else 1)
+        if not df[df['PER']<=0].empty: df.loc[df['PER']<=0, 'S_PER'] = 0
 
-        # 2. ROE 점수 (높을수록 좋음)
-        # Score = (My_ROE - Min) / (Max - Min)
-        max_r = df['ROE'].max()
-        min_r = df['ROE'].min()
-        denom = (max_r - min_r) if max_r != min_r else 1
-        df['S_ROE'] = (df['ROE'] - min_r) / denom
+        max_r, min_r = df['ROE'].max(), df['ROE'].min()
+        df['S_ROE'] = (df['ROE'] - min_r) / ((max_r - min_r) if max_r != min_r else 1)
 
-        # 3. EPS 점수 (높을수록 좋음)
-        max_e = df['EPS'].max()
-        min_e = df['EPS'].min()
-        denom = (max_e - min_e) if max_e != min_e else 1
-        df['S_EPS'] = (df['EPS'] - min_e) / denom
+        max_e, min_e = df['EPS'].max(), df['EPS'].min()
+        df['S_EPS'] = (df['EPS'] - min_e) / ((max_e - min_e) if max_e != min_e else 1)
         
-        # 4. 부채비율 점수 (낮을수록 좋음)
-        # Score = (Max_Debt - My_Debt) / (Max - Min)
-        max_d = df['부채비율'].max()
-        min_d = df['부채비율'].min()
-        denom = (max_d - min_d) if max_d != min_d else 1
-        df['S_Debt'] = (max_d - df['부채비율']) / denom
+        max_d, min_d = df['부채비율'].max(), df['부채비율'].min()
+        df['S_Debt'] = (max_d - df['부채비율']) / ((max_d - min_d) if max_d != min_d else 1)
         
-        # 5. 가중치 적용 및 최종 점수 (0~100)
         df['점수'] = (df['S_PER']*w_per + df['S_ROE']*w_roe + df['S_EPS']*w_eps + df['S_Debt']*w_debt)
         
         final_max = df['점수'].max()
@@ -277,15 +301,38 @@ if st.session_state['res'] is not None:
                      use_container_width=True)
         
     with c_chat:
-        st.subheader("💬 Gemini 퀀트 컨설턴트")
+        st.subheader("💬 Gemini 퀀트 컨설턴트 (Tech+Fund)")
         stock_list = res['종목명'].tolist()
-        target_name = st.selectbox("분석할 종목 선택", stock_list)
+        target_name = st.selectbox("종목 선택 (기술적 지표 자동계산)", stock_list)
         
         if target_name != st.session_state['current_ticker']:
             st.session_state['current_ticker'] = target_name
             st.session_state['chat_history'] = []
+            
+            # 기본 재무 정보
             t_data = res[res['종목명']==target_name].iloc[0]
-            welcome_msg = f"**{target_name}**\nPER: {t_data['PER']:.2f} | ROE: {t_data['ROE']:.2f}% | 부채: {t_data['부채비율']:.0f}%"
+            ticker_symbol = t_data['티커']
+            
+            # [NEW] 기술적 지표 계산 (선택 시점에 실행)
+            with st.spinner("차트 데이터 분석 중..."):
+                tech_data = calculate_technicals(ticker_symbol)
+            
+            # 환영 메시지 구성
+            if tech_data:
+                tech_msg = f"""
+                📊 **기술적 지표 (Technical Analysis)**
+                - **RSI (14)**: {tech_data['RSI']:.2f} ({'과매수' if tech_data['RSI']>70 else '과매도' if tech_data['RSI']<30 else '중립'})
+                - **Stochastic K**: {tech_data['Stochastic_K']:.2f}
+                - **CCI**: {tech_data['CCI']:.2f}
+                - **Williams %R**: {tech_data['Williams_R']:.2f}
+                - **Momentum**: {tech_data['Momentum']:.2f}
+                """
+                st.session_state['tech_context'] = tech_msg # AI에게 넘겨줄 데이터 저장
+            else:
+                tech_msg = "\n(차트 데이터 부족으로 기술적 지표 계산 실패)"
+                st.session_state['tech_context'] = ""
+
+            welcome_msg = f"**{target_name}** ({ticker_symbol})\nPER: {t_data['PER']:.2f} | ROE: {t_data['ROE']:.2f}% | 부채: {t_data['부채비율']:.0f}%" + tech_msg
             st.session_state['chat_history'].append({"role": "assistant", "content": welcome_msg})
 
         chat_container = st.container(height=400)
@@ -293,7 +340,7 @@ if st.session_state['res'] is not None:
             with chat_container.chat_message(msg["role"]):
                 st.write(msg["content"])
         
-        if prompt := st.chat_input("질문 입력..."):
+        if prompt := st.chat_input("질문 입력 (예: 지금 사도 될까?)"):
             if not api_key: st.error("API 키 필요")
             else:
                 st.session_state['chat_history'].append({"role": "user", "content": prompt})
@@ -305,8 +352,22 @@ if st.session_state['res'] is not None:
                     try:
                         genai.configure(api_key=api_key)
                         model = genai.GenerativeModel(ai_model)
+                        
                         t_data = res[res['종목명']==target_name].iloc[0]
-                        ctx = f"종목:{t_data['종목명']}, 주가:{t_data['현재가']}, PER:{t_data['PER']}, ROE:{t_data['ROE']}, 부채비율:{t_data['부채비율']}%. 질문:{prompt}. 한국어 답변."
+                        tech_info = st.session_state.get('tech_context', '')
+                        
+                        # [핵심] 재무 + 기술 데이터를 모두 프롬프트에 넣음
+                        ctx = f"""
+                        [기본적 분석]
+                        종목:{t_data['종목명']}, 주가:{t_data['현재가']}, PER:{t_data['PER']}, ROE:{t_data['ROE']}, 부채비율:{t_data['부채비율']}%
+                        
+                        [기술적 분석]
+                        {tech_info}
+                        
+                        질문:{prompt}
+                        
+                        주식 전문가로서, 재무 건전성과 기술적 타점(RSI, 스토캐스틱 등)을 종합하여 투자 의견을 한국어로 제시해줘.
+                        """
                         response = model.generate_content(ctx, stream=True)
                         for chunk in response:
                             if chunk.text:
