@@ -7,13 +7,13 @@ import time
 import requests
 import numpy as np
 from pykrx import stock
-from bs4 import BeautifulSoup # [NEW] 코드 추출용
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
 # --- 1. 페이지 설정 ---
-st.set_page_config(page_title="AI 퀀트 V38 (Final)", layout="wide")
-st.title("🤖 AI 퀀트 스크리너 V38 (Smart Code Extractor)")
-st.markdown("네이버 크롤링 시 **종목 코드를 함께 추출**하여, 기술적 분석 연결 속도를 획기적으로 개선했습니다.")
+st.set_page_config(page_title="AI 퀀트 V39 (Final UI)", layout="wide")
+st.title("🤖 AI 퀀트 스크리너 V39 (UI & US Data Fix)")
+st.markdown("미국 데이터 수집 오류를 수정하고, **넓은 화면**에서 분석할 수 있도록 레이아웃을 개선했습니다.")
 
 # --- 2. 사이드바 ---
 st.sidebar.header("1. 시장 선택")
@@ -24,9 +24,11 @@ target_sector = "전체"
 
 if country == "미국 (US)":
     market_index = st.sidebar.selectbox("지수", ["S&P 500 / NASDAQ", "Russell 2000 (중소형)"])
+    # [수정 2] '전체 (All)'를 맨 위로 올려서 기본값으로 설정
     target_sector = st.sidebar.selectbox("섹터 (업종)", [
+        "전체 (All)",
         "기술 (Technology)", "커뮤니케이션 (Communication)", "헬스케어 (Healthcare)", 
-        "소비재 (Consumer)", "금융 (Financial)", "에너지/산업 (Energy/Ind)", "전체 (All)"
+        "소비재 (Consumer)", "금융 (Financial)", "에너지/산업 (Energy/Ind)"
     ])
 else:
     market_index = st.sidebar.selectbox("지수", ["KOSPI", "KOSDAQ"])
@@ -39,11 +41,11 @@ use_log_y = st.sidebar.checkbox("Y축 (ROE) 로그", value=False)
 show_avg = st.sidebar.checkbox("평균선 표시", value=True)
 
 st.sidebar.markdown("---")
-st.sidebar.header("3. 가중치 설정")
-w_per = st.sidebar.slider("저평가 (PER)", 0, 100, 40)
-w_roe = st.sidebar.slider("수익성 (ROE)", 0, 100, 40)
-w_eps = st.sidebar.slider("성장성 (EPS)", 0, 100, 10)
-w_debt = st.sidebar.slider("안정성 (부채비율)", 0, 100, 10)
+st.sidebar.header("3. 가중치 설정 (총합 100 권장)")
+w_per = st.sidebar.slider("저평가 (PER, 낮을수록 좋음)", 0, 100, 40)
+w_roe = st.sidebar.slider("수익성 (ROE, 높을수록 좋음)", 0, 100, 40)
+w_eps = st.sidebar.slider("성장성 (EPS, 높을수록 좋음)", 0, 100, 10)
+w_debt = st.sidebar.slider("안정성 (부채비율, 낮을수록 좋음)", 0, 100, 10)
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔑 AI 설정")
@@ -74,58 +76,46 @@ def get_session():
     })
     return session
 
-# --- 기술적 지표 계산 (V38 최적화) ---
+# --- 기술적 지표 계산 ---
 def calculate_technicals(ticker_code, country_code, market_index=""):
     df = pd.DataFrame()
     
     try:
-        # 1. 한국 주식 (PyKRX 우선 -> 실패시 YFinance)
         if country_code == "한국 (KR)":
             end_dt = datetime.now().strftime("%Y%m%d")
             start_dt = (datetime.now() - timedelta(days=200)).strftime("%Y%m%d")
-            
             try:
-                # PyKRX 시도
                 df = stock.get_market_ohlcv(start_dt, end_dt, ticker_code)
                 if df.empty: raise Exception("Empty PyKRX")
-                # 컬럼명 통일
                 df.columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Amount', 'Rate'][:len(df.columns)]
                 df = df[['Open', 'High', 'Low', 'Close']]
             except:
-                # 실패 시 YFinance로 우회 (.KS or .KQ)
                 suffix = ".KQ" if "KOSDAQ" in market_index else ".KS"
                 df = yf.download(f"{ticker_code}{suffix}", period="6mo", progress=False)
-        
-        # 2. 미국 주식
         else:
             df = yf.download(ticker_code, period="6mo", progress=False)
             
         if len(df) < 20: return None
 
-        # 지표 계산
         close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
         high = df['High'].iloc[:, 0] if isinstance(df['High'], pd.DataFrame) else df['High']
         low = df['Low'].iloc[:, 0] if isinstance(df['Low'], pd.DataFrame) else df['Low']
         
-        # RSI
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
         
-        # Stochastic
         lowest_low = low.rolling(14).min()
         highest_high = high.rolling(14).max()
         k_percent = 100 * ((close - lowest_low) / (highest_high - lowest_low))
         
-        # CCI
         tp = (high + low + close) / 3
         sma_tp = tp.rolling(20).mean()
         mean_dev = tp.rolling(20).apply(lambda x: np.mean(np.abs(x - x.mean())))
         cci = (tp - sma_tp) / (0.015 * mean_dev)
         
-        # Williams %R
         w_r = -100 * ((highest_high - close) / (highest_high - lowest_low))
         
         return {
@@ -141,7 +131,7 @@ def calculate_technicals(ticker_code, country_code, market_index=""):
 def analyze_data(country, index, sector):
     data = []
     
-    # 🇺🇸 미국 (YF)
+    # 🇺🇸 미국 (수정: 개별 조회로 복구)
     if country == "미국 (US)":
         sector_map = {
             "기술 (Technology)": ['AAPL', 'MSFT', 'NVDA', 'AVGO', 'AMD', 'INTC', 'CRM', 'ADBE', 'ORCL', 'IBM', 'QCOM', 'TXN', 'NOW', 'AMAT', 'MU', 'PLTR', 'SMCI'],
@@ -163,16 +153,25 @@ def analyze_data(country, index, sector):
                 target_tickers = sector_map.get(sector, [])
 
         bar = st.progress(0, text=f"🇺🇸 {sector} 데이터 수집 중...")
-        tickers_obj = yf.Tickers(' '.join(target_tickers))
         
+        # [수정 3] yf.Tickers(배치) -> yf.Ticker(개별) + Sleep 복구
+        # 이유: 클라우드에서 배치는 누락이 심함
         for i, t in enumerate(target_tickers):
             try:
-                ticker = tickers_obj.tickers[t]
+                ticker = yf.Ticker(t) # 개별 객체 생성
+                
+                # 1. Price
                 try: price = ticker.fast_info['last_price']
                 except: price = 0
-                time.sleep(0.3)
+                
+                # 2. Info (0.2s 딜레이)
+                time.sleep(0.2) 
+                
                 try:
                     info = ticker.info
+                    # info가 None이거나 비어있을 경우 대비
+                    if not info: raise ValueError("Empty Info")
+                    
                     name = info.get('shortName', t)
                     per = info.get('trailingPE', 0)
                     roe = info.get('returnOnEquity', 0) * 100 if info.get('returnOnEquity') else 0
@@ -180,6 +179,7 @@ def analyze_data(country, index, sector):
                     debt = info.get('debtToEquity', 0)
                     if price == 0: price = info.get('currentPrice', 0)
                 except:
+                    # 실패 시 기본값
                     name = t
                     per, roe, eps, debt = 0, 0, 0, 0
                 
@@ -189,7 +189,7 @@ def analyze_data(country, index, sector):
             bar.progress((i+1)/len(target_tickers))
         bar.empty()
 
-    # 🇰🇷 한국 (Naver + BS4로 코드 추출)
+    # 🇰🇷 한국
     else:
         session = get_session()
         sosok = 0 if index == 'KOSPI' else 1
@@ -202,26 +202,15 @@ def analyze_data(country, index, sector):
             try:
                 res = session.get(url_base + str(page))
                 soup = BeautifulSoup(res.text, 'html.parser')
-                
-                # [핵심] BeautifulSoup으로 (종목명, 코드) 매핑 딕셔너리 생성
-                # 네이버 시총 페이지 구조: <a href="/item/main.naver?code=005930" class="tltle">삼성전자</a>
                 code_map = {}
-                links = soup.select('a.tltle')
-                for a in links:
-                    name = a.text
-                    href = a['href'] # /item/main.naver?code=005930
-                    if 'code=' in href:
-                        code = href.split('code=')[1]
-                        code_map[name] = code
+                for a in soup.select('a.tltle'):
+                    if 'code=' in a['href']:
+                        code_map[a.text] = a['href'].split('code=')[1]
                 
-                # 표 데이터 읽기
                 dfs = pd.read_html(res.text, encoding='euc-kr', header=0, flavor='bs4')
                 df = dfs[1].dropna(subset=['종목명'])
                 df = df[df['종목명'] != '종목명']
-                
-                # [핵심] DataFrame에 'Code' 컬럼 추가
                 df['Code'] = df['종목명'].map(code_map)
-                
                 all_dfs.append(df)
                 bar.progress(page / 4)
                 time.sleep(0.3)
@@ -233,16 +222,13 @@ def analyze_data(country, index, sector):
             for _, row in final_df.iterrows():
                 try:
                     name = row['종목명']
-                    # 코드가 없으면 패스 (매핑 실패)
                     code = row.get('Code', '')
                     if not code or pd.isna(code): continue
-                        
                     price = clean_numeric(row['현재가'])
                     per = clean_numeric(row['PER'])
                     roe = clean_numeric(row['ROE'])
                     eps = (price/per) if per>0 else 0
                     debt = 0 
-                    
                     data.append({'티커':code, '종목명':name, '현재가':price, 'PER':per, 'ROE':roe, 'EPS':int(eps), '부채비율':debt})
                 except: continue
 
@@ -295,6 +281,7 @@ if st.session_state['res'] is not None:
     avg_per = res[res['PER']>0]['PER'].mean()
     avg_roe = res['ROE'].mean()
     
+    # 1. 차트 영역
     fig = px.scatter(
         res, x='PER', y='ROE', 
         size='Size', color='점수', 
@@ -305,74 +292,86 @@ if st.session_state['res'] is not None:
         log_x=use_log_x, 
         log_y=use_log_y
     )
+    if show_avg:
+        if avg_per > 0: fig.add_vline(x=avg_per, line_dash="dash", line_color="gray", annotation_text=f"Avg PER: {avg_per:.1f}")
+        if avg_roe > 0: fig.add_hline(y=avg_roe, line_dash="dash", line_color="gray", annotation_text=f"Avg ROE: {avg_roe:.1f}%")
+    
     st.plotly_chart(fig, use_container_width=True)
     
-    c_tbl, c_chat = st.columns([1.5, 1])
+    # [수정 1] 2. 랭킹 리스트 영역 (넓게)
+    st.subheader("🏆 랭킹 리스트")
+    st.dataframe(res[['순위','종목명','점수','현재가','PER','ROE','EPS','부채비율']].set_index('순위')
+                    .style.format({'현재가':'{:.0f}', 'PER':'{:.2f}', 'ROE':'{:.2f}', 'EPS':'{:.2f}', '부채비율':'{:.2f}'}), 
+                    use_container_width=True)
+
+    st.markdown("---") # 구분선 추가
+
+    # [수정 1] 3. 퀀트 컨설턴트 영역 (하단 전체)
+    st.subheader("💬 Gemini 퀀트 컨설턴트 (종목 심층 분석)")
     
-    with c_tbl:
-        st.subheader("🏆 랭킹 리스트")
-        st.dataframe(res[['순위','종목명','점수','현재가','PER','ROE','EPS','부채비율']].set_index('순위')
-                     .style.format({'현재가':'{:.0f}', 'PER':'{:.2f}', 'ROE':'{:.2f}', 'EPS':'{:.2f}', '부채비율':'{:.2f}'}), 
-                     use_container_width=True)
-        
-    with c_chat:
-        st.subheader("💬 Gemini 퀀트 컨설턴트")
-        stock_list = res['종목명'].tolist()
-        target_name = st.selectbox("종목 선택 (지표 자동계산)", stock_list)
-        
-        if target_name != st.session_state['current_ticker']:
-            st.session_state['current_ticker'] = target_name
-            st.session_state['chat_history'] = []
-            
-            t_data = res[res['종목명']==target_name].iloc[0]
-            ticker_code = t_data['티커'] # 이제 진짜 코드(005930)가 들어있음
-            
-            with st.spinner(f"{target_name} 기술적 분석 중..."):
-                # [핵심] 여기서 국가와 마켓 정보를 넘겨서 fallback 처리
-                tech_data = calculate_technicals(str(ticker_code), country, market_index)
-            
-            if tech_data:
-                tech_msg = f"""
-                📊 **기술적 지표 (6개월 기준)**
-                - **RSI**: {tech_data['RSI']:.2f}
-                - **Stochastic K**: {tech_data['Stochastic_K']:.2f}
-                - **CCI**: {tech_data['CCI']:.2f}
-                - **Williams %R**: {tech_data['Williams_R']:.2f}
-                """
-                st.session_state['tech_context'] = tech_msg
-            else:
-                tech_msg = "\n(차트 데이터 수집 실패)"
-                st.session_state['tech_context'] = ""
+    # 2단 분리: 왼쪽(선택), 오른쪽(채팅) -> 아니면 전체 채팅
+    # 채팅은 넓은게 좋으므로 전체 너비 사용.
+    # 종목 선택 박스
+    stock_list = res['종목명'].tolist()
+    
+    # 선택 박스를 깔끔하게 위쪽에 배치
+    c_sel, c_dummy = st.columns([1, 2])
+    with c_sel:
+        target_name = st.selectbox("분석할 종목을 선택하세요 (기술적 지표 자동 계산)", stock_list)
 
-            welcome_msg = f"**{target_name}** ({ticker_code})\nPER: {t_data['PER']:.2f} | ROE: {t_data['ROE']:.2f}% | 부채: {t_data['부채비율']:.0f}%" + tech_msg
-            st.session_state['chat_history'].append({"role": "assistant", "content": welcome_msg})
-
-        chat_container = st.container(height=400)
-        for msg in st.session_state['chat_history']:
-            with chat_container.chat_message(msg["role"]):
-                st.write(msg["content"])
+    if target_name != st.session_state['current_ticker']:
+        st.session_state['current_ticker'] = target_name
+        st.session_state['chat_history'] = []
         
-        if prompt := st.chat_input("질문 입력..."):
-            if not api_key: st.error("API 키 필요")
-            else:
-                st.session_state['chat_history'].append({"role": "user", "content": prompt})
-                with chat_container.chat_message("user"): st.write(prompt)
-                
-                with chat_container.chat_message("assistant"):
-                    msg_ph = st.empty()
-                    full_res = ""
-                    try:
-                        genai.configure(api_key=api_key)
-                        model = genai.GenerativeModel(ai_model)
-                        t_data = res[res['종목명']==target_name].iloc[0]
-                        tech_info = st.session_state.get('tech_context', '')
-                        ctx = f"종목:{t_data['종목명']}, 재무:[PER:{t_data['PER']}, ROE:{t_data['ROE']}, 부채:{t_data['부채비율']}%]. 기술적분석:{tech_info}. 질문:{prompt}. 한국어 답변."
-                        response = model.generate_content(ctx, stream=True)
-                        for chunk in response:
-                            if chunk.text:
-                                full_res += chunk.text
-                                msg_ph.markdown(full_res + "▌")
-                                time.sleep(0.02)
-                        msg_ph.markdown(full_res)
-                        st.session_state['chat_history'].append({"role": "assistant", "content": full_res})
-                    except Exception as e: st.error(f"Error: {e}")
+        t_data = res[res['종목명']==target_name].iloc[0]
+        ticker_code = t_data['티커']
+        
+        with st.spinner(f"{target_name} 차트 데이터 분석 중..."):
+            tech_data = calculate_technicals(str(ticker_code), country, market_index)
+        
+        if tech_data:
+            tech_msg = f"""
+            📊 **기술적 지표 (Technical)**
+            - **RSI**: {tech_data['RSI']:.2f}
+            - **Stochastic K**: {tech_data['Stochastic_K']:.2f}
+            - **CCI**: {tech_data['CCI']:.2f}
+            - **Williams %R**: {tech_data['Williams_R']:.2f}
+            """
+            st.session_state['tech_context'] = tech_msg
+        else:
+            tech_msg = "\n(차트 데이터 수집 실패)"
+            st.session_state['tech_context'] = ""
+
+        welcome_msg = f"**{target_name}** ({ticker_code})\nPER: {t_data['PER']:.2f} | ROE: {t_data['ROE']:.2f}% | 부채: {t_data['부채비율']:.0f}%" + tech_msg
+        st.session_state['chat_history'].append({"role": "assistant", "content": welcome_msg})
+
+    # 채팅 UI
+    chat_container = st.container(height=500) # 높이 넉넉하게
+    for msg in st.session_state['chat_history']:
+        with chat_container.chat_message(msg["role"]):
+            st.write(msg["content"])
+    
+    if prompt := st.chat_input("질문 입력 (예: 지금 매수 타이밍이야?)"):
+        if not api_key: st.error("API 키 필요")
+        else:
+            st.session_state['chat_history'].append({"role": "user", "content": prompt})
+            with chat_container.chat_message("user"): st.write(prompt)
+            
+            with chat_container.chat_message("assistant"):
+                msg_ph = st.empty()
+                full_res = ""
+                try:
+                    genai.configure(api_key=api_key)
+                    model = genai.GenerativeModel(ai_model)
+                    t_data = res[res['종목명']==target_name].iloc[0]
+                    tech_info = st.session_state.get('tech_context', '')
+                    ctx = f"종목:{t_data['종목명']}, 재무:[PER:{t_data['PER']}, ROE:{t_data['ROE']}, 부채:{t_data['부채비율']}%]. 기술적분석:{tech_info}. 질문:{prompt}. 한국어 답변."
+                    response = model.generate_content(ctx, stream=True)
+                    for chunk in response:
+                        if chunk.text:
+                            full_res += chunk.text
+                            msg_ph.markdown(full_res + "▌")
+                            time.sleep(0.02)
+                    msg_ph.markdown(full_res)
+                    st.session_state['chat_history'].append({"role": "assistant", "content": full_res})
+                except Exception as e: st.error(f"Error: {e}")
