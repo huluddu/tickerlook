@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.express as px
+import plotly.graph_objects as go # [NEW] 캔들 차트용
 import google.generativeai as genai
 import time
 import requests
@@ -11,9 +12,9 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
 # --- 1. 페이지 설정 ---
-st.set_page_config(page_title="AI 퀀트 V39 (Final UI)", layout="wide")
-st.title("🤖 AI 퀀트 스크리너 V39 (UI & US Data Fix)")
-st.markdown("미국 데이터 수집 오류를 수정하고, **넓은 화면**에서 분석할 수 있도록 레이아웃을 개선했습니다.")
+st.set_page_config(page_title="AI 퀀트 V40 (Chart View)", layout="wide")
+st.title("🤖 AI 퀀트 스크리너 V40 (Trend & Chart)")
+st.markdown("종목 선택 시 **3년치 일봉 차트와 120일 이평선**을 시각화하여 장기 추세를 한눈에 파악합니다.")
 
 # --- 2. 사이드바 ---
 st.sidebar.header("1. 시장 선택")
@@ -24,7 +25,6 @@ target_sector = "전체"
 
 if country == "미국 (US)":
     market_index = st.sidebar.selectbox("지수", ["S&P 500 / NASDAQ", "Russell 2000 (중소형)"])
-    # [수정 2] '전체 (All)'를 맨 위로 올려서 기본값으로 설정
     target_sector = st.sidebar.selectbox("섹터 (업종)", [
         "전체 (All)",
         "기술 (Technology)", "커뮤니케이션 (Communication)", "헬스케어 (Healthcare)", 
@@ -76,17 +76,83 @@ def get_session():
     })
     return session
 
+# --- [NEW] 차트 시각화 함수 ---
+def draw_chart(ticker_code, country_code, market_index=""):
+    try:
+        df = pd.DataFrame()
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=365*3) # 3년치
+        
+        # 데이터 로드
+        if country_code == "한국 (KR)":
+            s_str = start_dt.strftime("%Y%m%d")
+            e_str = end_dt.strftime("%Y%m%d")
+            try:
+                df = stock.get_market_ohlcv(s_str, e_str, ticker_code)
+                if df.empty: return None
+                df.columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Amount', 'Rate'][:len(df.columns)]
+                df = df[['Open', 'High', 'Low', 'Close']]
+            except:
+                suffix = ".KQ" if "KOSDAQ" in market_index else ".KS"
+                df = yf.download(f"{ticker_code}{suffix}", start=start_dt, end=end_dt, progress=False)
+        else:
+            df = yf.download(ticker_code, start=start_dt, end=end_dt, progress=False)
+            
+        if len(df) < 10: return None
+
+        # yfinance 멀티인덱스 대응 (Close가 DataFrame일 경우)
+        if isinstance(df['Close'], pd.DataFrame):
+            df_new = pd.DataFrame()
+            df_new['Close'] = df['Close'].iloc[:, 0]
+            df_new['Open'] = df['Open'].iloc[:, 0]
+            df_new['High'] = df['High'].iloc[:, 0]
+            df_new['Low'] = df['Low'].iloc[:, 0]
+            df = df_new
+
+        # 120일 이평선 계산
+        df['MA120'] = df['Close'].rolling(window=120).mean()
+
+        # Plotly 캔들차트
+        fig = go.Figure()
+
+        # 캔들스틱
+        fig.add_trace(go.Candlestick(
+            x=df.index,
+            open=df['Open'], high=df['High'],
+            low=df['Low'], close=df['Close'],
+            name='주가'
+        ))
+
+        # 120일선 (오렌지색)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['MA120'],
+            mode='lines', name='120일 이평선',
+            line=dict(color='orange', width=2)
+        ))
+
+        fig.update_layout(
+            title=f"📊 지난 3년 주가 흐름 (with MA120)",
+            yaxis_title="주가",
+            xaxis_rangeslider_visible=False, # 하단 슬라이더 제거 (깔끔하게)
+            height=500,
+            template="plotly_dark",
+            margin=dict(l=20, r=20, t=50, b=20)
+        )
+        return fig
+
+    except Exception as e:
+        return None
+
 # --- 기술적 지표 계산 ---
 def calculate_technicals(ticker_code, country_code, market_index=""):
     df = pd.DataFrame()
-    
     try:
         if country_code == "한국 (KR)":
             end_dt = datetime.now().strftime("%Y%m%d")
             start_dt = (datetime.now() - timedelta(days=200)).strftime("%Y%m%d")
             try:
                 df = stock.get_market_ohlcv(start_dt, end_dt, ticker_code)
-                if df.empty: raise Exception("Empty PyKRX")
+                if df.empty: raise Exception
                 df.columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'Amount', 'Rate'][:len(df.columns)]
                 df = df[['Open', 'High', 'Low', 'Close']]
             except:
@@ -97,9 +163,12 @@ def calculate_technicals(ticker_code, country_code, market_index=""):
             
         if len(df) < 20: return None
 
-        close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
-        high = df['High'].iloc[:, 0] if isinstance(df['High'], pd.DataFrame) else df['High']
-        low = df['Low'].iloc[:, 0] if isinstance(df['Low'], pd.DataFrame) else df['Low']
+        if isinstance(df['Close'], pd.DataFrame):
+            close = df['Close'].iloc[:, 0]
+            high = df['High'].iloc[:, 0]
+            low = df['Low'].iloc[:, 0]
+        else:
+            close, high, low = df['Close'], df['High'], df['Low']
         
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
@@ -131,7 +200,6 @@ def calculate_technicals(ticker_code, country_code, market_index=""):
 def analyze_data(country, index, sector):
     data = []
     
-    # 🇺🇸 미국 (수정: 개별 조회로 복구)
     if country == "미국 (US)":
         sector_map = {
             "기술 (Technology)": ['AAPL', 'MSFT', 'NVDA', 'AVGO', 'AMD', 'INTC', 'CRM', 'ADBE', 'ORCL', 'IBM', 'QCOM', 'TXN', 'NOW', 'AMAT', 'MU', 'PLTR', 'SMCI'],
@@ -154,24 +222,16 @@ def analyze_data(country, index, sector):
 
         bar = st.progress(0, text=f"🇺🇸 {sector} 데이터 수집 중...")
         
-        # [수정 3] yf.Tickers(배치) -> yf.Ticker(개별) + Sleep 복구
-        # 이유: 클라우드에서 배치는 누락이 심함
         for i, t in enumerate(target_tickers):
             try:
-                ticker = yf.Ticker(t) # 개별 객체 생성
-                
-                # 1. Price
+                ticker = yf.Ticker(t)
                 try: price = ticker.fast_info['last_price']
                 except: price = 0
                 
-                # 2. Info (0.2s 딜레이)
-                time.sleep(0.2) 
-                
+                time.sleep(0.2)
                 try:
                     info = ticker.info
-                    # info가 None이거나 비어있을 경우 대비
-                    if not info: raise ValueError("Empty Info")
-                    
+                    if not info: raise ValueError
                     name = info.get('shortName', t)
                     per = info.get('trailingPE', 0)
                     roe = info.get('returnOnEquity', 0) * 100 if info.get('returnOnEquity') else 0
@@ -179,7 +239,6 @@ def analyze_data(country, index, sector):
                     debt = info.get('debtToEquity', 0)
                     if price == 0: price = info.get('currentPrice', 0)
                 except:
-                    # 실패 시 기본값
                     name = t
                     per, roe, eps, debt = 0, 0, 0, 0
                 
@@ -189,7 +248,6 @@ def analyze_data(country, index, sector):
             bar.progress((i+1)/len(target_tickers))
         bar.empty()
 
-    # 🇰🇷 한국
     else:
         session = get_session()
         sosok = 0 if index == 'KOSPI' else 1
@@ -274,14 +332,12 @@ if st.button("🚀 데이터 분석 시작", type="primary"):
     else:
         st.error("데이터 수집 실패. (잠시 후 다시 시도해주세요)")
 
-# 결과 출력
 if st.session_state['res'] is not None:
     res = st.session_state['res']
     
     avg_per = res[res['PER']>0]['PER'].mean()
     avg_roe = res['ROE'].mean()
     
-    # 1. 차트 영역
     fig = px.scatter(
         res, x='PER', y='ROE', 
         size='Size', color='점수', 
@@ -298,26 +354,19 @@ if st.session_state['res'] is not None:
     
     st.plotly_chart(fig, use_container_width=True)
     
-    # [수정 1] 2. 랭킹 리스트 영역 (넓게)
     st.subheader("🏆 랭킹 리스트")
     st.dataframe(res[['순위','종목명','점수','현재가','PER','ROE','EPS','부채비율']].set_index('순위')
                     .style.format({'현재가':'{:.0f}', 'PER':'{:.2f}', 'ROE':'{:.2f}', 'EPS':'{:.2f}', '부채비율':'{:.2f}'}), 
                     use_container_width=True)
 
-    st.markdown("---") # 구분선 추가
+    st.markdown("---") 
 
-    # [수정 1] 3. 퀀트 컨설턴트 영역 (하단 전체)
     st.subheader("💬 Gemini 퀀트 컨설턴트 (종목 심층 분석)")
     
-    # 2단 분리: 왼쪽(선택), 오른쪽(채팅) -> 아니면 전체 채팅
-    # 채팅은 넓은게 좋으므로 전체 너비 사용.
-    # 종목 선택 박스
     stock_list = res['종목명'].tolist()
-    
-    # 선택 박스를 깔끔하게 위쪽에 배치
     c_sel, c_dummy = st.columns([1, 2])
     with c_sel:
-        target_name = st.selectbox("분석할 종목을 선택하세요 (기술적 지표 자동 계산)", stock_list)
+        target_name = st.selectbox("분석할 종목을 선택하세요", stock_list)
 
     if target_name != st.session_state['current_ticker']:
         st.session_state['current_ticker'] = target_name
@@ -326,9 +375,16 @@ if st.session_state['res'] is not None:
         t_data = res[res['종목명']==target_name].iloc[0]
         ticker_code = t_data['티커']
         
-        with st.spinner(f"{target_name} 차트 데이터 분석 중..."):
-            tech_data = calculate_technicals(str(ticker_code), country, market_index)
+        # [NEW] 차트 그리기
+        chart_fig = None
+        with st.spinner(f"{target_name} 차트 로딩 중..."):
+             chart_fig = draw_chart(str(ticker_code), country, market_index)
+             tech_data = calculate_technicals(str(ticker_code), country, market_index)
         
+        # 차트 출력 (있을 때만)
+        if chart_fig:
+            st.plotly_chart(chart_fig, use_container_width=True)
+
         if tech_data:
             tech_msg = f"""
             📊 **기술적 지표 (Technical)**
@@ -345,13 +401,13 @@ if st.session_state['res'] is not None:
         welcome_msg = f"**{target_name}** ({ticker_code})\nPER: {t_data['PER']:.2f} | ROE: {t_data['ROE']:.2f}% | 부채: {t_data['부채비율']:.0f}%" + tech_msg
         st.session_state['chat_history'].append({"role": "assistant", "content": welcome_msg})
 
-    # 채팅 UI
-    chat_container = st.container(height=500) # 높이 넉넉하게
+    # (차트가 위에서 이미 그려졌으므로, 아래는 채팅만)
+    chat_container = st.container(height=500)
     for msg in st.session_state['chat_history']:
         with chat_container.chat_message(msg["role"]):
             st.write(msg["content"])
     
-    if prompt := st.chat_input("질문 입력 (예: 지금 매수 타이밍이야?)"):
+    if prompt := st.chat_input("질문 입력..."):
         if not api_key: st.error("API 키 필요")
         else:
             st.session_state['chat_history'].append({"role": "user", "content": prompt})
