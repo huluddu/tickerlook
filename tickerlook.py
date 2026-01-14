@@ -428,7 +428,7 @@ if st.session_state['res'] is not None:
                     model = genai.GenerativeModel(ai_model)
                     t_data = res[res['종목명']==target_name].iloc[0]
                     tech_info = st.session_state.get('tech_context', '')
-                    ctx = f"종목:{t_data['종목명']}, 재무:[PER:{t_data['PER']}, ROE:{t_data['ROE']}, 부채:{t_data['부채비율']}%]. 기술적분석:{tech_info}. 질문:{prompt}. 한국어 답변."
+                    ctx = f"종목:{t_data['종목명']}, 재무:[현재가:{t_data['현재']}, PER:{t_data['PER']}, ROE:{t_data['ROE']}, 부채:최근 자료 검색해서 확인 해줘]. 기술적분석:{tech_info}. 질문:{prompt}. 한국어 답변."
                     response = model.generate_content(ctx, stream=True)
                     for chunk in response:
                         if chunk.text:
@@ -438,3 +438,4 @@ if st.session_state['res'] is not None:
                     msg_ph.markdown(full_res)
                     st.session_state['chat_history'].append({"role": "assistant", "content": full_res})
                 except Exception as e: st.error(f"Error: {e}")
+
